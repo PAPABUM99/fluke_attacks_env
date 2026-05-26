@@ -11,8 +11,14 @@ hyperparameters:
     scheduler:
       gamma: 1
       step_size: 1
+  malicious_clients:
+    sigma: 0.1
   server:
     weighted: true
+    malicious_perc: 0.4
+    niters: 5
+    c: 1.0
+    b: 10000
   model: MNIST_2NN
-name: fluke.algorithms.fedavg.FedAVG
+name: fluke.algorithms.attacks.fedavg_dnc_def.FedAVGAttack
 

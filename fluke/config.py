@@ -24,6 +24,13 @@ sys.path.append(".")
 __all__ = ["Configuration", "ConfigurationError", "OptimizerConfigurator"]
 
 
+class _MyValidator(Validator):
+    def _check_with_validate_malicious_hp(self, field, value) -> None:
+        malicious_clients = self.root_document.get("method").get("hyperparameters").get("malicious_clients")
+        if value > 0.0 and malicious_clients is None:
+            self._error(field, f"It's {value} so hyperparameters for 'malicious_clients' attribute must be set, but 'None' has been found.")
+
+
 class ConfigurationError(Exception):
     """Exception raised when the configuration is not valid."""
 
@@ -287,6 +294,13 @@ class Configuration(DDict):
                     "min": 0.0,
                     "max": 1.0,
                 },
+                "malicious_perc": {
+		    		"type": "float", 
+		    		"required": True, 
+                    "min": 0.0, 
+                    "max": 1.0,
+                    "check_with": "validate_malicious_hp",
+		        },
                 "n_clients": {"type": "integer", "required": True, "min": 1},
                 "n_rounds": {"type": "integer", "required": True, "min": 1},
             },
@@ -338,6 +352,7 @@ class Configuration(DDict):
                                 },
                             },
                         },
+                        "malicious_clients": {"type": "dict", "required": False},
                         "server": {"type": "dict"},
                         "model": {"type": "string", "required": True},
                     },
@@ -352,7 +367,7 @@ class Configuration(DDict):
         if "save" not in data:
             return {}, []
 
-        save_valid = Validator()
+        save_valid = _MyValidator()
         save_valid.schema = {
             "save_every": {"type": "integer", "default": 1, "min": 1},
             "path": {"type": "string", "default": "./models"},
@@ -367,7 +382,7 @@ class Configuration(DDict):
 
     def _validate(self) -> None:
 
-        validator = Validator()
+        validator = _MyValidator()
         validator.schema = self.__SCHEMA
         validator.allow_unknown = True
 

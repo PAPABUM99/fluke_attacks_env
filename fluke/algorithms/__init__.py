@@ -20,7 +20,7 @@ sys.path.append("..")
 from .. import DDict, FlukeENV, ObserverSubject, custom_formatwarning  # NOQA
 from ..client import Client  # NOQA
 from ..comm import ChannelObserver  # NOQA
-from ..config import OptimizerConfigurator  # NOQA
+from ..config import Configuration, OptimizerConfigurator  # NOQA
 from ..data import DataSplitter, FastDataLoader  # NOQA
 from ..server import Server, EarlyStopping  # NOQA
 from ..utils import ClientObserver, FederationObserver, ServerObserver, get_loss, get_model  # NOQA
@@ -28,6 +28,7 @@ from ..utils import ClientObserver, FederationObserver, ServerObserver, get_loss
 warnings.formatwarning = custom_formatwarning
 
 __all__ = [
+    "attacks",
     "decentralized",
     "CentralizedFL",
     "PersonalizedFL",
@@ -93,10 +94,8 @@ class CentralizedFL(ObserverSubject):
     orchestrate the training process.
 
     Args:
-        n_clients (int): Number of clients.
+        cfg (Configuration): Hyperparameters from the ``exp.yaml`` file and from ``[ALG_CONFIG]`` file.
         data_splitter (DataSplitter): Data splitter object.
-        hyper_params (DDict): Hyperparameters of the algorithm. This set of hyperparameteers should
-            be divided in two parts: the client hyperparameters and the server hyperparameters.
         clients (list[Client], optional): List of already initialized clients. If not `None`, the
             clients will be used instead of creating new ones, so `n_clients` and `data_splitter`
             will be ignored. Defaults to ``None``.
@@ -116,14 +115,19 @@ class CentralizedFL(ObserverSubject):
 
     def __init__(
         self,
-        n_clients: int,
+        cfg: Configuration,
         data_splitter: DataSplitter,
-        hyper_params: DDict | dict[str, Any],
         clients: list[Client] = None,
         server: Server = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
+        self.cfg = cfg
+
+        # alias
+        hyper_params = self.cfg.method.hyperparameters
+        protocol = self.cfg.protocol
+
         if (clients is not None and server is None) or (clients is None and server is not None):
             raise ValueError("Both clients and server must be provided or neither of them.")
 
@@ -132,12 +136,12 @@ class CentralizedFL(ObserverSubject):
 
         if clients is not None:
             self.clients = clients
-            self.n_clients = len(clients)
-            if self.n_clients != n_clients:
+            n_clients = len(clients)
+            if n_clients != protocol.n_clients:
                 warnings.warn(
-                    f"Number of clients provided ({self.n_clients}) is different from"
-                    + f"the number of clients expected ({n_clients}). Overwriting "
-                    + f"the number of clients to {self.n_clients}."
+                    f"Number of clients provided ({n_clients}) is different from"
+                    + f"the number of clients expected ({protocol.n_clients}). Overwriting "
+                    + f"the number of clients to {n_clients}."
                 )
             self.server = server
             model_name = "Unknown"
@@ -145,18 +149,13 @@ class CentralizedFL(ObserverSubject):
                 model_name = server.model.__class__.__name__
             else:
                 model_name = clients[0].model.__class__.__name__
-            self.hyper_params = DDict(
-                client=clients[0].hyper_params, server=server.hyper_params, model=model_name
-            )
+            hyper_params.client = clients[0].hyper_params
+            hyper_params.server = server.hyper_params
+            hyper_params.model = model_name
 
         else:
-            if isinstance(hyper_params, dict):
-                hyper_params = DDict(hyper_params)
-
-            self.hyper_params = hyper_params
-            self.n_clients = n_clients
             (clients_tr_data, clients_te_data), server_data = data_splitter.assign(
-                n_clients, hyper_params.client.batch_size
+                protocol.n_clients, hyper_params.client.batch_size
             )
             # Federated model
             model = (
@@ -267,6 +266,10 @@ class CentralizedFL(ObserverSubject):
         Returns:
             Sequence[Client]: List of initialized clients.
         """
+        # alias
+        protocol = self.cfg.protocol
+        # clients percentage
+        n_normal_clients = protocol.n_clients - int(protocol.n_clients * protocol.malicious_perc)
 
         self._fix_opt_cfg(config.optimizer)
         optimizer_cfg = OptimizerConfigurator(
@@ -282,7 +285,7 @@ class CentralizedFL(ObserverSubject):
                 loss_fn=deepcopy(loss),
                 **config.exclude("optimizer", "loss", "batch_size", "scheduler"),
             )
-            for i in range(self.n_clients)
+            for i in range(n_normal_clients)
         ]
         return clients
 
@@ -354,7 +357,7 @@ class CentralizedFL(ObserverSubject):
         with FlukeENV().get_live_renderer():
             progress_fl = FlukeENV().get_progress_bar("FL")
             progress_client = FlukeENV().get_progress_bar("clients")
-            client_x_round = int(self.n_clients * eligible_perc)
+            client_x_round = int(self.cfg.protocol.n_clients * eligible_perc)
             task_rounds = progress_fl.add_task("[red]FL Rounds", total=n_rounds * client_x_round)
             task_local = progress_client.add_task("[green]Local Training", total=client_x_round)
 
@@ -434,13 +437,15 @@ class CentralizedFL(ObserverSubject):
             self.notify(event="server_evaluation", round=round + 1, eval_type="global", evals=evals)
 
     def __str__(self, indent: int = 0) -> str:
-        algo_hp = f"\n\tmodel={str(self.hyper_params.model)}("
-        if "net_args" in self.hyper_params:
-            algo_hp += ", ".join([f"{k}={v}" for k, v in self.hyper_params.net_args.items()])
+        #alias
+        hyper_params = self.cfg.method.hyperparameters
+        algo_hp = f"\n\tmodel={str(hyper_params.model)}("
+        if "net_args" in hyper_params:
+            algo_hp += ", ".join([f"{k}={v}" for k, v in hyper_params.net_args.items()])
         algo_hp += ")"
         extra_hp = [
             f"{h}={v}"
-            for h, v in self.hyper_params.items()
+            for h, v in hyper_params.items()
             if h not in ["client", "server", "model", "net_args"]
         ]
         if extra_hp:
@@ -453,7 +458,7 @@ class CentralizedFL(ObserverSubject):
             client_str = (
                 self.clients[0]
                 .__str__(indent=indent + 4)
-                .replace("[0](", f"[0-{self.n_clients - 1}](")
+                .replace("[0](", f"[0-{self.cfg.protocol.n_clients - 1}](")
             )
 
         if self.server is None:
@@ -568,6 +573,11 @@ class PersonalizedFL(CentralizedFL):
                 "Invalid model configuration. It should be a string or a torch.nn.Module"
             )
 
+        # alias
+        protocol = self.cfg.protocol
+        # clients percentage
+        n_normal_clients = protocol.n_clients - int(protocol.n_clients * protocol.malicious_perc)
+
         self._fix_opt_cfg(config.optimizer)
         optimizer_cfg = OptimizerConfigurator(
             optimizer_cfg=config.optimizer, scheduler_cfg=config.scheduler
@@ -583,6 +593,6 @@ class PersonalizedFL(CentralizedFL):
                 loss_fn=deepcopy(loss),
                 **config.exclude("optimizer", "loss", "batch_size", "model", "scheduler"),
             )
-            for i in range(self.n_clients)
+            for i in range(n_normal_clients)
         ]
         return clients

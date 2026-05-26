@@ -202,7 +202,7 @@ def _run_federation(cfg: Configuration, resume: str | None = None, show_dist: bo
     )
 
     fl_algo_class = get_class_from_qualified_name(cfg.method.name)
-    fl_algo = fl_algo_class(cfg.protocol.n_clients, data_splitter, cfg.method.hyperparameters)
+    fl_algo = fl_algo_class(cfg, data_splitter)
 
     if cfg.save and cfg.save.path:
         path = f"{cfg.save.path}_{fl_algo.id}"

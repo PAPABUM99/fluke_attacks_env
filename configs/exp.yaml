@@ -27,8 +27,11 @@ eval:
   locals: false
   server: true
 logger:
-  name: Log
+  name: WandBLog
+  project: test-attack-defence
+  entity: serrano-ferny-tesi-fluke
 protocol:
   eligible_perc: 0.2
+  malicious_perc: 0.4
   n_clients: 100
   n_rounds: 100

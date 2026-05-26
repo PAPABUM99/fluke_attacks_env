@@ -24,7 +24,7 @@ from .evaluation import Evaluator  # NOQA
 from .utils import cache_obj, clear_cuda_cache, retrieve_obj  # NOQA
 from .utils.model import ModOpt, safe_load_state_dict  # NOQA
 
-__all__ = ["Client", "PFLClient"]
+__all__ = ["Client", "PFLClient", "MaliciousClient"]
 
 
 class Client(ObserverSubject):
@@ -749,3 +749,116 @@ class PFLClient(Client):
             torch.nn.Module: The local model.
         """
         return self.personalized_model
+
+
+class MaliciousClient(Client):
+    """Class used only for instantiating malicious clients for attacks on FL algorithms.
+
+    It inherits the :class:`Client` class and accepts the same arguments plus additional
+    hyperparameters specific to the attacking client.
+
+    The default behaviour of a malicious client is to train like a benign client, but
+    adding noise to the model parameters after training. The type of noise must be
+    specified in the ``[ALG_CONFIG]`` file under the ``name`` attribute, as in the
+    following example:
+    
+    .. code-block:: yaml
+    
+        name: fluke.algorithms.attacks.fedavg_gaussian.FedAVGAttack
+
+    Args:
+        *args: Positional arguments passed to :class:`Client`.
+        malicious_hp (DDict, optional): Hyperparameters specific to the malicious client.
+            If ``None``, initializes as an empty ``DDict``. Default: ``None``.
+        **kwargs: Keyword arguments passed to :class:`Client`.
+
+    Important:
+        When inheriting from this class to create other types of malicious clients, the
+        default behaviour can be overridden if necessary. Otherwise, copy the :meth:`fit`
+        method and modify only the ``# add noise ...`` section.
+    """
+    def __init__(
+            self, 
+            index: int, 
+            train_set: FastDataLoader, 
+            test_set: FastDataLoader, 
+            optimizer_cfg: OptimizerConfigurator, 
+            loss_fn: Module, 
+            local_epochs: int = 3, 
+            fine_tuning_epochs: int = 0, 
+            clipping: int = 0, 
+            persistency: bool = True, 
+            malicious_hp: DDict = None, 
+            **kwargs
+        ):
+        super().__init__(
+            index=index, 
+            train_set=train_set, 
+            test_set=test_set, 
+            optimizer_cfg=optimizer_cfg, 
+            loss_fn=loss_fn, 
+            local_epochs=local_epochs, 
+            fine_tuning_epochs=fine_tuning_epochs, 
+            clipping=clipping, 
+            persistency=persistency, 
+            **kwargs
+        )
+        self.malicious_hp = malicious_hp if malicious_hp is not None else DDict()
+
+    def add_noise(self, params):
+        pass
+
+    def fit(self, override_local_epochs: int = 0):
+        epochs: int = (
+            override_local_epochs if override_local_epochs > 0 else self.hyper_params.local_epochs
+        )
+        
+        self.model.train()
+        self.model.to(self.device)
+
+        if self.optimizer is None:
+            self.optimizer, self.scheduler = self._optimizer_cfg(self.model)
+
+        running_loss = 0.0
+        for _ in range(epochs):
+            for _, (X, y) in enumerate(self.train_set):
+                X, y = X.to(self.device), y.to(self.device)
+                self.optimizer.zero_grad()
+                y_hat = self.model(X)
+                loss = self.hyper_params.loss_fn(y_hat, y)
+                loss.backward()                
+                self._clip_grads(self.model)
+                self.optimizer.step()
+                running_loss += loss.item()
+            self.scheduler.step()
+
+        # add noise (es. gaussian, ...)
+        with torch.no_grad():
+            for _, param in self.model.named_parameters():
+                self.add_noise(param)
+
+        train_batches = epochs * len(self.train_set)
+        if train_batches > 0:
+            running_loss /= train_batches
+
+        self.model.cpu()
+        clear_cuda_cache()
+        return running_loss
+    
+    def __str__(self, indent: int = 0) -> str:
+        hp = DDict(self.hyper_params, self.malicious_hp)
+        clsname = f"{self.__class__.__name__}[{self._index}]"
+        indentstr = " " * (indent + len(clsname))
+        hpstr = f",\n{indentstr}".join([f"{h}={str(v)}" for h, v in hp.items()])
+        hpstr = f",\n{indentstr}" + hpstr if hpstr else ""
+        optcfg_str = ""
+        if self._optimizer_cfg is not None:
+            optcfg_str = (
+                f"{indentstr}optim="
+                + f"{self._optimizer_cfg.__str__(indent=7 + indent + len(clsname))},\n"
+            )
+        return (
+            f"{clsname}(\n"
+            + optcfg_str
+            + f"{indentstr}batch_size={self.train_set.batch_size}{hpstr})"
+        )
